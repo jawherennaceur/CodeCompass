@@ -1,0 +1,13 @@
+{
+  "_comment": "Chaque entrée : une requête + le chunk_id attendu (format 'file_path:name:start_line'). À compléter une fois ton repo indexé — regarde la sortie de scripts/index_repo.py pour connaître les chunk_id réels.",
+  "queries": [
+    {
+      "query": "où est définie la fonction de connexion à la base de données",
+      "expected_chunk_contains": "connect_db"
+    },
+    {
+      "query": "comment sont gérées les erreurs d'authentification",
+      "expected_chunk_contains": "auth"
+    }
+  ]
+}
