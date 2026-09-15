@@ -5,6 +5,7 @@ en chunks au niveau fonction/classe (pas par nombre de lignes fixe).
 Chaque chunk retourné contient : le code, le nom, le type (function/class),
 le chemin du fichier, et les lignes de départ/fin.
 """
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -29,6 +30,19 @@ _CHUNK_NODE_TYPES = {
     "typescript": {"function_declaration", "class_declaration", "method_definition"},
     "tsx": {"function_declaration", "class_declaration", "method_definition"},
     "javascript": {"function_declaration", "class_declaration", "method_definition"},
+}
+
+# CORRECTIF (revue, bug critique #4) : en Python, une fonction/classe
+# décorée (@app.route, @staticmethod, @property, @pytest.fixture...) a
+# pour nœud racine "decorated_definition", PAS "function_definition"
+# directement — le décorateur est un sibling en dehors du nœud capturé
+# jusqu'ici. Sans ça, le décorateur (souvent l'info la plus importante,
+# ex: la route d'un endpoint) était silencieusement absent du chunk.
+# NOTE: TS/JS gèrent les décorateurs différemment dans leur grammaire —
+# non couvert ici, limitation connue et documentée (pas une correction
+# silencieuse).
+_DECORATOR_WRAPPER_TYPES = {
+    "python": {"decorated_definition"},
 }
 
 
@@ -62,6 +76,35 @@ def _extract_name(node, source_bytes: bytes) -> str:
     return "<anonymous>"
 
 
+def _make_chunk_id(file_path: str, name: str, start_line: int) -> str:
+    """
+    CORRECTIF (revue, bug high #5) : l'ancien format f"{file_path}:{name}:{start_line}"
+    cassait sur Windows, où file_path contient déjà un ':' (ex: "C:\\Users\\...").
+    On utilise un hash déterministe à la place — stable, sans ambiguïté de
+    séparateur, et réutilisable tel quel comme ID de point Qdrant (voir
+    indexing/dense_index.py).
+    """
+    raw = f"{file_path}|{name}|{start_line}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _make_chunk(node, node_type: str, file_path: Path, source_bytes: bytes) -> CodeChunk:
+    code = source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+    start_line = node.start_point[0] + 1
+    end_line = node.end_point[0] + 1
+    name = _extract_name(node, source_bytes)
+    chunk_id = _make_chunk_id(str(file_path), name, start_line)
+    return CodeChunk(
+        chunk_id=chunk_id,
+        file_path=str(file_path),
+        name=name,
+        node_type=node_type,
+        code=code,
+        start_line=start_line,
+        end_line=end_line,
+    )
+
+
 def parse_file(file_path: Path) -> list[CodeChunk]:
     """Parse un seul fichier et retourne la liste de ses chunks."""
     ext = file_path.suffix
@@ -74,33 +117,28 @@ def parse_file(file_path: Path) -> list[CodeChunk]:
     tree = parser.parse(source_bytes)
 
     chunk_types = _CHUNK_NODE_TYPES.get(lang_name, set())
+    wrapper_types = _DECORATOR_WRAPPER_TYPES.get(lang_name, set())
     chunks: list[CodeChunk] = []
 
-    def walk(node):
-        if node.type in chunk_types:
-            code = source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
-            start_line = node.start_point[0] + 1
-            end_line = node.end_point[0] + 1
+    def walk(node, skip_ids: frozenset = frozenset()):
+        if node.type in wrapper_types:
+            # Le wrapper (ex: decorated_definition) capture décorateur(s)
+            # + définition en une seule fois, sur toute la plage du nœud.
+            inner = next(
+                (c for c in node.children if c.type in chunk_types), None
+            )
+            inner_type = inner.type if inner is not None else node.type
+            chunks.append(_make_chunk(node, inner_type, file_path, source_bytes))
+            # On empêche le nœud interne (function_definition brut) d'être
+            # capturé une seconde fois — sinon on aurait deux chunks quasi
+            # identiques : un avec décorateur, un sans.
+            if inner is not None:
+                skip_ids = skip_ids | {id(inner)}
+        elif node.type in chunk_types and id(node) not in skip_ids:
+            chunks.append(_make_chunk(node, node.type, file_path, source_bytes))
 
-            # Garde-fou: si un chunk est énorme, on le garde quand même
-            # mais on pourrait choisir de le sous-découper ici plus tard.
-            name = _extract_name(node, source_bytes)
-            chunk_id = f"{file_path}:{name}:{start_line}"
-            chunks.append(CodeChunk(
-                chunk_id=chunk_id,
-                file_path=str(file_path),
-                name=name,
-                node_type=node.type,
-                code=code,
-                start_line=start_line,
-                end_line=end_line,
-            ))
-            # Ne pas descendre dans les enfants d'un chunk déjà capturé
-            # évite les doublons méthode-dans-classe si non désiré.
-            # (Ici on choisit de continuer à descendre pour capturer aussi
-            # les méthodes internes comme chunks séparés.)
         for child in node.children:
-            walk(child)
+            walk(child, skip_ids)
 
     walk(tree.root_node)
     return chunks

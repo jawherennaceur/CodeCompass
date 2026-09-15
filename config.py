@@ -5,7 +5,17 @@ Toutes les valeurs peuvent être surchargées via variables d'environnement
 (voir .env.example). Ce fichier ne contient AUCUN secret.
 """
 import os
+import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+# CRITIQUE (revue): .env n'était jamais chargé — os.getenv() lisait
+# uniquement les variables déjà exportées manuellement dans le shell.
+# Sans cette ligne, ANTHROPIC_API_KEY était systématiquement vide en
+# usage normal, et le routeur tombait en fallback silencieux à chaque
+# requête sans que rien ne le signale.
+load_dotenv()
 
 # --- Repo cible ---------------------------------------------------------
 # Chemin absolu vers le repo de code à indexer (le tien, en usage réel).
@@ -36,6 +46,13 @@ BM25_INDEX_PATH = os.getenv("BM25_INDEX_PATH", "./data/bm25_index.pkl")
 # --- Routeur (Haiku) -------------------------------------------------------
 # Nécessite ANTHROPIC_API_KEY dans l'environnement (.env)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+if not ANTHROPIC_API_KEY:
+    print(
+        "[CONFIG WARNING] ANTHROPIC_API_KEY est vide — le routeur tombera "
+        "systématiquement en fallback 'hybrid' sur chaque requête, sans "
+        "appeler Haiku. Vérifie ton fichier .env.",
+        file=sys.stderr,
+    )
 ROUTER_MODEL = os.getenv("ROUTER_MODEL", "claude-haiku-4-5-20251001")
 ROUTER_MAX_TOKENS = 50  # réponse courte attendue: "dense" | "sparse" | "hybrid"
 ROUTER_LATENCY_BUDGET_MS = 200  # critère de validation du projet
