@@ -41,7 +41,7 @@ QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "search_code_chunks")
 
 # --- Index sparse (BM25) --------------------------------------------------
-BM25_INDEX_PATH = os.getenv("BM25_INDEX_PATH", "./data/bm25_index.pkl")
+BM25_INDEX_PATH = os.getenv("BM25_INDEX_PATH", "./data/bm25_index.json")
 
 # --- Routeur (Haiku) -------------------------------------------------------
 # Nécessite ANTHROPIC_API_KEY dans l'environnement (.env)
