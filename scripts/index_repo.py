@@ -30,8 +30,10 @@ def main():
     sparse_index.save()
     print("Index sparse (BM25) construit et sauvegardé.")
 
-    n_dense = build_dense_index(chunks)
+    n_dense, n_orphans = build_dense_index(chunks)
     print(f"Index dense (Qdrant) construit : {n_dense} vecteurs insérés.")
+    if n_orphans:
+        print(f"{n_orphans} vecteur(s) obsolète(s) nettoyé(s) (code supprimé depuis la dernière indexation).")
 
     print("Indexation terminée.")
 
