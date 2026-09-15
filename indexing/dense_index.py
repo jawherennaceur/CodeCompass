@@ -22,6 +22,17 @@ from ingestion.parser import CodeChunk
 
 _model: SentenceTransformer | None = None
 
+# Namespace fixe pour dériver un UUID stable à partir de chunk_id.
+# Sans ça, chaque ré-indexation créerait de nouveaux points au lieu
+# d'écraser les existants (doublons infinis dans Qdrant).
+_POINT_ID_NAMESPACE = uuid.UUID("7c1f2b2a-0000-4000-8000-000000000001")
+
+
+def _point_id_for(chunk_id: str) -> str:
+    """UUID déterministe : le même chunk_id produit toujours le même ID,
+    donc upsert() écrase bien l'ancien point au lieu d'en créer un nouveau."""
+    return str(uuid.uuid5(_POINT_ID_NAMESPACE, chunk_id))
+
 
 def get_model() -> SentenceTransformer:
     """Charge le modèle d'embeddings local une seule fois (singleton)."""
@@ -58,7 +69,7 @@ def build_dense_index(chunks: list[CodeChunk], batch_size: int = 32):
 
         for chunk, vector in zip(batch, embeddings):
             points.append(PointStruct(
-                id=str(uuid.uuid4()),
+                id=_point_id_for(chunk.chunk_id),
                 vector=vector.tolist(),
                 payload={
                     "chunk_id": chunk.chunk_id,
@@ -80,11 +91,17 @@ def search_dense(query: str, top_k: int = 5) -> list[dict]:
     client = get_client()
     query_vector = model.encode(query).tolist()
 
-    results = client.search(
-        collection_name=QDRANT_COLLECTION,
-        query_vector=query_vector,
-        limit=top_k,
-    )
+    try:
+        response = client.query_points(
+            collection_name=QDRANT_COLLECTION,
+            query=query_vector,
+            limit=top_k,
+        )
+        results = response.points
+    except Exception as e:
+        print(f"[ERROR] Recherche dense indisponible (Qdrant injoignable ?): {e}")
+        return []
+
     return [
         {
             "chunk_id": r.payload["chunk_id"],
