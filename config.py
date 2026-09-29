@@ -43,17 +43,18 @@ QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "search_code_chunks")
 # --- Index sparse (BM25) --------------------------------------------------
 BM25_INDEX_PATH = os.getenv("BM25_INDEX_PATH", "./data/bm25_index.json")
 
-# --- Routeur (Haiku) -------------------------------------------------------
-# Nécessite ANTHROPIC_API_KEY dans l'environnement (.env)
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-if not ANTHROPIC_API_KEY:
+# --- Routeur (NIM) -------------------------------------------------------
+# Nécessite NVIDIA_API_KEY dans l'environnement (.env)
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+if not NVIDIA_API_KEY:
     print(
-        "[CONFIG WARNING] ANTHROPIC_API_KEY est vide — le routeur tombera "
-        "systématiquement en fallback 'hybrid' sur chaque requête, sans "
-        "appeler Haiku. Vérifie ton fichier .env.",
+        "[CONFIG WARNING] NVIDIA_API_KEY est vide — le routeur tombera "
+        "systématiquement en fallback 'hybrid' sur les requêtes ambiguës, "
+        "sans appeler le modèle NIM. Vérifie ton fichier .env.",
         file=sys.stderr,
     )
-ROUTER_MODEL = os.getenv("ROUTER_MODEL", "claude-haiku-4-5-20251001")
+NIM_BASE_URL = os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
+ROUTER_MODEL = os.getenv("ROUTER_MODEL", "meta/llama-3.2-11b-vision-instruct")
 ROUTER_MAX_TOKENS = 50  # réponse courte attendue: "dense" | "sparse" | "hybrid"
 ROUTER_LATENCY_BUDGET_MS = 200  # critère de validation du projet
 

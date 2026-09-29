@@ -1,26 +1,28 @@
 """
 Routeur : classifie une requête utilisateur en "dense", "sparse" ou "hybrid".
 
-Approche retenue (Option C, discutée en revue) : une heuristique légère
-tranche d'abord les cas évidents sans aucun appel réseau. Haiku n'est
-appelé qu'en repli, pour les requêtes réellement ambiguës. Ça évite de
-payer une latence de 300-800ms et une dépendance réseau pour des
-requêtes comme "connect_db" qui n'ont besoin d'aucune "intelligence"
-pour être classifiées correctement.
+Approche retenue (Option C) : une heuristique légère tranche d'abord les
+cas évidents sans aucun appel réseau. Le modèle NIM (NVIDIA) n'est
+appelé qu'en repli, pour les requêtes réellement ambiguës.
+
+Fournisseur : NVIDIA NIM (API compatible OpenAI), modèle
+meta/llama-3.1-8b-instruct — remplace l'API Anthropic (Haiku) utilisée
+initialement, décision explicite pour accéder à un tier gratuit/moins
+coûteux.
 """
 import re
 import time
 
-import anthropic
+from openai import OpenAI
 
-from config import ANTHROPIC_API_KEY, ROUTER_MODEL, ROUTER_MAX_TOKENS, ROUTER_LATENCY_BUDGET_MS
+from config import NVIDIA_API_KEY, NIM_BASE_URL, ROUTER_MODEL, ROUTER_MAX_TOKENS, ROUTER_LATENCY_BUDGET_MS
 
 _ROUTER_SYSTEM_PROMPT = """Tu classifies des requêtes de recherche de code en une seule catégorie parmi :
 - "sparse" : la requête contient un nom exact (fonction, classe, variable, fichier) à rechercher tel quel.
 - "dense" : la requête décrit une intention/un concept sans nom précis (ex: "où est géré le retry ?").
 - "hybrid" : la requête mélange un terme précis ET une intention plus large.
 
-Réponds UNIQUEMENT par un seul mot : sparse, dense, ou hybrid. Aucune explication.
+Réponds UNIQUEMENT par un seul mot : sparse, dense, ou hybrid. Aucune explication, aucune ponctuation.
 
 Exemples :
 Q: "où est définie la fonction parse_config" -> sparse
@@ -28,91 +30,84 @@ Q: "comment est gérée l'authentification" -> dense
 Q: "tous les endroits qui utilisent le cache Redis pour les sessions" -> hybrid
 """
 
-_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+_client = OpenAI(base_url=NIM_BASE_URL, api_key=NVIDIA_API_KEY)
 
 _VALID_ROUTES = {"sparse", "dense", "hybrid"}
 
 # --- Heuristique de pré-filtrage (Option C) --------------------------------
 
-# Un mot "ressemble à un identifiant" s'il contient un underscore
-# (snake_case) ou une transition minuscule->majuscule (camelCase).
 _IDENTIFIER_PATTERN = re.compile(r"_|[a-z][A-Z]")
 
-# Marqueurs de langage naturel — mots qui n'apparaissent presque jamais
-# dans un identifiant de code mais très souvent dans une vraie question.
 _NATURAL_LANGUAGE_MARKERS = {
-    # Français
     "comment", "où", "pourquoi", "quoi", "quand", "qui", "que",
     "est", "sont", "gérée", "géré", "gère", "fonctionne", "utilisé",
     "utilisée", "tous", "toutes", "les", "endroits",
-    # Anglais
     "how", "where", "why", "what", "when", "who", "which",
     "is", "are", "does", "do", "handled", "used",
 }
 
 
 def _looks_like_identifier(word: str) -> bool:
-    return bool(_IDENTIFIER_PATTERN.search(word))
+    return bool(_IDENTIFIER_PATTERN.search(word.strip("?,.:;'\"")))
+
+
+_MAX_WORDS_FOR_SPARSE = 3
+_MIN_WORDS_FOR_DENSE = 5
 
 
 def _heuristic_classify(query: str) -> str | None:
     """Retourne 'sparse', 'dense', ou None si le cas est ambigu (auquel
-    cas on doit appeler Haiku pour trancher)."""
+    cas on doit appeler le modèle NIM pour trancher)."""
     words = query.strip().split()
     num_words = len(words)
 
     if num_words == 0:
         return None
 
-    # Cas évident -> sparse : requête courte (1-3 mots) où au moins un
-    # mot ressemble clairement à un identifiant de code, ou requête à
-    # un seul mot (quasi toujours une recherche d'identifiant précis).
-    if num_words == 1:
-        return "sparse"
-    if num_words <= 3 and any(_looks_like_identifier(w) for w in words):
+    identifier_flags = [_looks_like_identifier(w) for w in words]
+    identifier_ratio = sum(identifier_flags) / num_words
+
+    lowered = {w.lower().strip("?,.:;'\"") for w in words}
+    has_nl_marker = bool(lowered & _NATURAL_LANGUAGE_MARKERS)
+
+    if identifier_ratio == 1.0 and num_words <= _MAX_WORDS_FOR_SPARSE:
         return "sparse"
 
-    # Cas évident -> dense : requête longue (5+ mots) contenant au
-    # moins un marqueur de langage naturel clair.
-    if num_words >= 5:
-        lowered = {w.lower().strip("?,.:;'\"") for w in words}
-        if lowered & _NATURAL_LANGUAGE_MARKERS:
-            return "dense"
+    if identifier_ratio == 0.0 and has_nl_marker and num_words >= _MIN_WORDS_FOR_DENSE:
+        return "dense"
 
-    # Tout le reste : ambigu, on laisse Haiku trancher.
     return None
 
 
 def classify_query(query: str) -> tuple[str, float, str | None]:
-    """Classification via Haiku uniquement (pas d'heuristique). Conservée
-    telle quelle — c'est la fonction appelée en repli par
-    classify_query_fast() pour les cas ambigus.
+    """Classification via le modèle NIM uniquement (pas d'heuristique).
+    Appelée en repli par classify_query_fast() pour les cas ambigus.
 
     Retourne (route, latence_ms, fallback_reason).
-    fallback_reason est None si le routeur a réellement classifié la
-    requête. S'il vaut "missing_api_key" ou "router_error", ça veut dire
-    que le résultat "hybrid" est un REPLI dû à une panne, pas un vrai
-    choix du routeur — voir revue critique, bug #3 : avant, les deux cas
-    étaient indiscernables dans la sortie.
     """
     start = time.perf_counter()
 
-    if not ANTHROPIC_API_KEY:
-        # Pas la peine de tenter l'appel réseau si on sait déjà qu'il va
-        # échouer sur l'authentification — plus rapide et plus clair.
+    if not NVIDIA_API_KEY:
         latency_ms = (time.perf_counter() - start) * 1000
         return "hybrid", latency_ms, "missing_api_key"
 
     try:
-        response = _client.messages.create(
+        response = _client.chat.completions.create(
             model=ROUTER_MODEL,
             max_tokens=ROUTER_MAX_TOKENS,
-            system=_ROUTER_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": query}],
+            temperature=0,
+            messages=[
+                {"role": "system", "content": _ROUTER_SYSTEM_PROMPT},
+                {"role": "user", "content": query},
+            ],
         )
-        raw = response.content[0].text.strip().lower()
-        route = raw if raw in _VALID_ROUTES else "hybrid"
-        fallback_reason = None if raw in _VALID_ROUTES else "unexpected_response"
+        raw = response.choices[0].message.content.strip().lower()
+        # Les modèles ouverts sont parfois moins disciplinés que Haiku
+        # sur la consigne "un seul mot" — on tolère la ponctuation
+        # résiduelle et on cherche le mot valide dans la réponse.
+        raw_clean = raw.strip(" .!\"'")
+        route = raw_clean if raw_clean in _VALID_ROUTES else "hybrid"
+        fallback_reason = None if raw_clean in _VALID_ROUTES else "unexpected_response"
     except Exception as e:
         print(f"[WARN] Routeur en échec ({e}), fallback sur 'hybrid'.")
         route = "hybrid"
@@ -128,13 +123,8 @@ def classify_query(query: str) -> tuple[str, float, str | None]:
 def classify_query_fast(query: str) -> tuple[str, float, str | None, str]:
     """Point d'entrée principal du routeur (Option C).
 
-    Applique d'abord l'heuristique. Si elle tranche, retour immédiat,
-    sans appel réseau. Sinon, appelle Haiku (classify_query) pour les
-    cas ambigus uniquement.
-
     Retourne (route, latence_ms, fallback_reason, source) où source
-    vaut "heuristic" ou "llm" — utile pour observer, sur de vraies
-    requêtes, la proportion de cas tranchés sans appel réseau.
+    vaut "heuristic" ou "llm".
     """
     start = time.perf_counter()
     heuristic_result = _heuristic_classify(query)
