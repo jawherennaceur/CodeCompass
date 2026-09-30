@@ -57,6 +57,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     output = run_search_code(query, top_k=top_k)
 
     lines = [f"Route: {output['route']} ({output['router_latency_ms']}ms)\n"]
+
+    if output.get("low_confidence"):
+        lines.append(
+            "⚠️ Aucun résultat vraiment pertinent trouvé dans le code indexé "
+            "pour cette requête. Les résultats ci-dessous sont les plus "
+            "proches disponibles, mais aucun n'est un bon match confirmé — "
+            "à mentionner avec cette réserve plutôt que comme une réponse "
+            "fiable.\n"
+        )
+
     for r in output["results"]:
         lines.append(
             f"--- {r['name']} ({r['file_path']}:{r['start_line']}-{r['end_line']}) ---\n"

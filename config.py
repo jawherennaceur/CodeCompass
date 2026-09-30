@@ -57,7 +57,7 @@ NIM_BASE_URL = os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 ROUTER_MODEL = os.getenv("ROUTER_MODEL", "meta/llama-3.2-11b-vision-instruct")
 ROUTER_MAX_TOKENS = 50  # réponse courte attendue: "dense" | "sparse" | "hybrid"
 ROUTER_LATENCY_BUDGET_MS = 200  # critère de validation du projet
-
+RERANK_CONFIDENCE_THRESHOLD = -5.0
 # --- Recherche / fusion -----------------------------------------------------
 TOP_K_DEFAULT = 5
 TOP_K_CANDIDATES = 20  # nombre de candidats avant reranking éventuel
