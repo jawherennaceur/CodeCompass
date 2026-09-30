@@ -1,164 +1,113 @@
-"""
-Routeur : classifie une requête utilisateur en "dense", "sparse" ou "hybrid".
+# search-code-mcp — Projet 1 "Fast & Precise"
 
-Approche retenue (Option C, discutée en revue) : une heuristique légère
-tranche d'abord les cas évidents sans aucun appel réseau. Haiku n'est
-appelé qu'en repli, pour les requêtes réellement ambiguës. Ça évite de
-payer une latence de 300-800ms et une dépendance réseau pour des
-requêtes comme "connect_db" qui n'ont besoin d'aucune "intelligence"
-pour être classifiées correctement.
-"""
-import re
-import time
+Moteur de recherche de code hybride (dense + sparse), exposé via MCP,
+pour être utilisé directement par Claude Desktop pendant que tu codes.
 
-import anthropic
+**Scénario retenu :** usage personnel sur ton propre repo (Scénario A).
 
-from config import ANTHROPIC_API_KEY, ROUTER_MODEL, ROUTER_MAX_TOKENS, ROUTER_LATENCY_BUDGET_MS
+## Architecture
 
-_ROUTER_SYSTEM_PROMPT = """Tu classifies des requêtes de recherche de code en une seule catégorie parmi :
-- "sparse" : la requête contient un nom exact (fonction, classe, variable, fichier) à rechercher tel quel.
-- "dense" : la requête décrit une intention/un concept sans nom précis (ex: "où est géré le retry ?").
-- "hybrid" : la requête mélange un terme précis ET une intention plus large.
+```
+Requête
+   │
+   ▼
+[Routeur Haiku] ──► dense | sparse | hybrid
+   │
+   ├──► Dense (embeddings locaux + Qdrant)
+   └──► Sparse (BM25)
+   │
+   ▼
+[Merger RRF] ──► fusionne si hybrid
+   │
+   ▼
+[Serveur MCP] ──► tool "search_code"
+   │
+   ▼
+Claude Desktop
+```
 
-Réponds UNIQUEMENT par un seul mot : sparse, dense, ou hybrid. Aucune explication.
+## Stack retenue (et pourquoi)
 
-Exemples :
-Q: "où est définie la fonction parse_config" -> sparse
-Q: "comment est gérée l'authentification" -> dense
-Q: "tous les endroits qui utilisent le cache Redis pour les sessions" -> hybrid
-"""
+| Composant | Choix | Raison |
+|---|---|---|
+| Parsing AST | tree-sitter | Standard multi-langage |
+| Embeddings | **Local** (`bge-small-en`) | Latence quasi nulle + confidentialité du code (rien n'est envoyé à un tiers) |
+| Base vectorielle | Qdrant (Docker) | Disponible et plus robuste que Chroma pour un usage continu |
+| Sparse | rank_bm25 | Léger, suffisant pour un repo perso |
+| Routeur | Claude Haiku | Classification rapide et fiable dense/sparse/hybrid |
+| Merger | Reciprocal Rank Fusion (RRF) | Ne nécessite pas de comparer des scores sur des échelles différentes |
 
-_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+## Setup
 
-_VALID_ROUTES = {"sparse", "dense", "hybrid"}
+### 1. Dépendances
 
-# --- Heuristique de pré-filtrage (Option C) --------------------------------
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
-_IDENTIFIER_PATTERN = re.compile(r"_|[a-z][A-Z]")
+### 2. Qdrant (Docker)
 
-_NATURAL_LANGUAGE_MARKERS = {
-    "comment", "où", "pourquoi", "quoi", "quand", "qui", "que",
-    "est", "sont", "gérée", "géré", "gère", "fonctionne", "utilisé",
-    "utilisée", "tous", "toutes", "les", "endroits",
-    "how", "where", "why", "what", "when", "who", "which",
-    "is", "are", "does", "do", "handled", "used",
+```bash
+docker compose up -d
+```
+
+### 3. Configuration
+
+```bash
+cp .env.example .env
+# Éditer .env : REPO_PATH, ANTHROPIC_API_KEY
+```
+
+### 4. Indexer ton repo
+
+```bash
+python scripts/index_repo.py
+```
+
+### 5. Tester en ligne de commande (avant de connecter Claude)
+
+```bash
+python scripts/test_search.py "où est gérée l'authentification"
+```
+
+### 6. Connecter à Claude Desktop
+
+Ajouter dans la config MCP de Claude Desktop (`claude_desktop_config.json`) :
+
+```json
+{
+  "mcpServers": {
+    "search-code": {
+      "command": "python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "/chemin/absolu/vers/search-code-mcp"
+    }
+  }
 }
+```
 
+Redémarrer Claude Desktop. Le tool `search_code` doit apparaître disponible.
 
-def _looks_like_identifier(word: str) -> bool:
-    return bool(_IDENTIFIER_PATTERN.search(word.strip("?,.:;'\"")))
+## Évaluation
 
+Compléter `tests/eval_queries.json` avec des requêtes réelles sur ton
+repo (une fois indexé), puis :
 
-# CONCEPTION PRODUCTION : on remplace "un seul mot suffit à trancher"
-# (fragile — pris en défaut en test réel sur "UserAuth flow" et sur
-# "où est définie la fonction parse_config") par un calcul de
-# PROPORTION sur l'ensemble de la requête, volontairement conservateur.
-# Principe : l'heuristique ne tranche QUE les cas sans ambiguïté
-# structurelle ; au moindre doute, elle renvoie None et laisse Haiku
-# décider. Le coût d'un appel Haiku de plus est minime comparé au coût
-# d'une mauvaise classification silencieuse dans un outil quotidien.
-_MAX_WORDS_FOR_SPARSE = 3
-_MIN_WORDS_FOR_DENSE = 5
+```bash
+python tests/evaluate.py
+```
 
+Affiche precision@5 pour dense seul / sparse seul / hybride.
 
-def _heuristic_classify(query: str) -> str | None:
-    """Retourne 'sparse', 'dense', ou None si le cas est ambigu (auquel
-    cas on doit appeler Haiku pour trancher)."""
-    words = query.strip().split()
-    num_words = len(words)
+## Ré-indexer après modification du repo
 
-    if num_words == 0:
-        return None
+Relancer simplement `python scripts/index_repo.py` — l'index sparse est
+régénéré entièrement, l'index dense est mis à jour (upsert) dans Qdrant.
 
-    identifier_flags = [_looks_like_identifier(w) for w in words]
-    identifier_ratio = sum(identifier_flags) / num_words
+## Prochaines étapes (hors squelette)
 
-    lowered = {w.lower().strip("?,.:;'\"") for w in words}
-    has_nl_marker = bool(lowered & _NATURAL_LANGUAGE_MARKERS)
-
-    # Cas évident -> sparse : TOUS les mots ressemblent à un
-    # identifiant (ratio 100%, pas "au moins un"), requête courte.
-    # "UserAuth flow" (ratio 50%) n'est PAS ce cas — "flow" suggère une
-    # intention plus large que "juste trouver ce symbole".
-    if identifier_ratio == 1.0 and num_words <= _MAX_WORDS_FOR_SPARSE:
-        return "sparse"
-
-    # Cas évident -> dense : AUCUN mot ne ressemble à un identifiant, un
-    # marqueur de langage naturel est présent, requête assez longue.
-    if identifier_ratio == 0.0 and has_nl_marker and num_words >= _MIN_WORDS_FOR_DENSE:
-        return "dense"
-
-    # Tout le reste (mélange identifiant + langage naturel, longueur
-    # intermédiaire, pas de marqueur clair...) : ambigu -> Haiku.
-    return None
-
-
-def classify_query(query: str) -> tuple[str, float, str | None]:
-    """Classification via Haiku uniquement (pas d'heuristique). Appelée
-    en repli par classify_query_fast() pour les cas ambigus.
-
-    Retourne (route, latence_ms, fallback_reason).
-    fallback_reason est None si le routeur a réellement classifié la
-    requête ; sinon il indique la panne ("missing_api_key",
-    "router_error", "unexpected_response").
-    """
-    start = time.perf_counter()
-
-    if not ANTHROPIC_API_KEY:
-        latency_ms = (time.perf_counter() - start) * 1000
-        return "hybrid", latency_ms, "missing_api_key"
-
-    try:
-        response = _client.messages.create(
-            model=ROUTER_MODEL,
-            max_tokens=ROUTER_MAX_TOKENS,
-            system=_ROUTER_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": query}],
-        )
-        raw = response.content[0].text.strip().lower()
-        route = raw if raw in _VALID_ROUTES else "hybrid"
-        fallback_reason = None if raw in _VALID_ROUTES else "unexpected_response"
-    except Exception as e:
-        print(f"[WARN] Routeur en échec ({e}), fallback sur 'hybrid'.")
-        route = "hybrid"
-        fallback_reason = "router_error"
-
-    latency_ms = (time.perf_counter() - start) * 1000
-    if latency_ms > ROUTER_LATENCY_BUDGET_MS:
-        print(f"[WARN] Routeur au-delà du budget latence: {latency_ms:.0f}ms")
-
-    return route, latency_ms, fallback_reason
-
-
-def classify_query_fast(query: str) -> tuple[str, float, str | None, str]:
-    """Point d'entrée principal du routeur (Option C).
-
-    Retourne (route, latence_ms, fallback_reason, source) où source
-    vaut "heuristic" ou "llm".
-    """
-    start = time.perf_counter()
-    heuristic_result = _heuristic_classify(query)
-
-    if heuristic_result is not None:
-        latency_ms = (time.perf_counter() - start) * 1000
-        return heuristic_result, latency_ms, None, "heuristic"
-
-    route, llm_latency_ms, fallback_reason = classify_query(query)
-    total_latency_ms = (time.perf_counter() - start) * 1000
-    return route, total_latency_ms, fallback_reason, "llm"
-
-
-if __name__ == "__main__":
-    test_queries = [
-        "connect_db",
-        "getUserData",
-        "où est définie la fonction parse_config",
-        "comment est gérée l'authentification des utilisateurs",
-        "gestion du cache",
-        "UserAuth flow",
-        "tous les endroits qui utilisent le cache Redis pour les sessions",
-    ]
-    for q in test_queries:
-        route, latency, fallback_reason, source = classify_query_fast(q)
-        status = f"(fallback: {fallback_reason})" if fallback_reason else "(choix réel)"
-        print(f"'{q}' -> {route} {status} [source={source}, {latency:.1f}ms]")
+- [ ] Reranker cross-encoder optionnel sur le top-20 avant top-5
+- [ ] UI web de démo (bonus, pour présentation/LinkedIn)
+- [ ] Ré-indexation incrémentale (ne re-parser que les fichiers modifiés)

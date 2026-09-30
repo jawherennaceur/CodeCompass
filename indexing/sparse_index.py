@@ -79,6 +79,7 @@ class SparseIndex:
         tokenized_query = _tokenize(query)
         scores = self.bm25.get_scores(tokenized_query)
         ranked = sorted(zip(self.chunks, scores), key=lambda x: x[1], reverse=True)
+        ranked = [(chunk, score) for chunk, score in ranked if score > 0]
         return ranked[:top_k]
 
     def save(self, path: str = BM25_INDEX_PATH):
