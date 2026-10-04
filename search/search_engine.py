@@ -9,7 +9,7 @@ from indexing.sparse_index import SparseIndex
 from routing.router import classify_query_fast
 from search.merger import merge_results
 from search.reranker import rerank
-
+import sys
 _sparse_index: SparseIndex | None = None
 
 
@@ -75,11 +75,11 @@ if __name__ == "__main__":
 
     query = sys.argv[1] if len(sys.argv) > 1 else "où est gérée l'authentification"
     output = search_code(query)
-    print(f"Route: {output['route']} (source={output['router_source']}, {output['router_latency_ms']}ms)")
+    print(f"Route: {output['route']} (source={output['router_source']}, {output['router_latency_ms']}ms)", file=sys.stderr)
     if output["router_fallback_reason"]:
-        print(f"⚠️  Fallback: {output['router_fallback_reason']}")
+        print(f"⚠️  Fallback: {output['router_fallback_reason']}", file=sys.stderr)
     if output["low_confidence"]:
-        print("⚠️  Faible confiance : aucun résultat ne semble vraiment pertinent")
+        print("⚠️  Faible confiance : aucun résultat ne semble vraiment pertinent", file=sys.stderr)
     for r in output["results"]:
         score = r.get("rerank_score", r.get("fused_score", r.get("score")))
-        print(f"- {r['name']} ({r['file_path']}:{r['start_line']}-{r['end_line']}) score={score}")
+        print(f"- {r['name']} ({r['file_path']}:{r['start_line']}-{r['end_line']}) score={score}", file=sys.stderr)

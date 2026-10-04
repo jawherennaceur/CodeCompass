@@ -10,7 +10,7 @@ même temps, donc plus précis, mais trop lent pour tout l'index — d'où
 son usage uniquement sur les 20 candidats déjà présélectionnés par RRF.
 """
 from sentence_transformers import CrossEncoder
-
+import sys
 from config import TOP_K_DEFAULT
 
 _CROSS_ENCODER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -60,4 +60,4 @@ if __name__ == "__main__":
     ]
     results = rerank(query, candidates, top_k=3)
     for i, r in enumerate(results, 1):
-        print(f"{i}. {r['name']}  (rerank_score={r['rerank_score']:.3f})")
+        print(f"{i}. {r['name']}  (rerank_score={r['rerank_score']:.3f})", file=sys.stderr)

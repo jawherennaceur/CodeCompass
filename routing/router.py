@@ -6,9 +6,9 @@ cas évidents sans aucun appel réseau. Le modèle NIM (NVIDIA) n'est
 appelé qu'en repli, pour les requêtes réellement ambiguës.
 
 Fournisseur : NVIDIA NIM (API compatible OpenAI), modèle
-meta/llama-3.1-8b-instruct — remplace l'API Anthropic (Haiku) utilisée
-initialement, décision explicite pour accéder à un tier gratuit/moins
-coûteux.
+meta/llama-3.2-11b-vision-instruct — remplace l'API Anthropic (Haiku)
+utilisée initialement, décision explicite pour accéder à un tier
+gratuit/moins coûteux.
 """
 import re
 import time
@@ -16,6 +16,9 @@ import time
 from openai import OpenAI
 
 from config import NVIDIA_API_KEY, NIM_BASE_URL, ROUTER_MODEL, ROUTER_MAX_TOKENS, ROUTER_LATENCY_BUDGET_MS
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 
 _ROUTER_SYSTEM_PROMPT = """Tu classifies des requêtes de recherche de code en une seule catégorie parmi :
 - "sparse" : la requête contient un nom exact (fonction, classe, variable, fichier) à rechercher tel quel.
@@ -102,20 +105,17 @@ def classify_query(query: str) -> tuple[str, float, str | None]:
             ],
         )
         raw = response.choices[0].message.content.strip().lower()
-        # Les modèles ouverts sont parfois moins disciplinés que Haiku
-        # sur la consigne "un seul mot" — on tolère la ponctuation
-        # résiduelle et on cherche le mot valide dans la réponse.
         raw_clean = raw.strip(" .!\"'")
         route = raw_clean if raw_clean in _VALID_ROUTES else "hybrid"
         fallback_reason = None if raw_clean in _VALID_ROUTES else "unexpected_response"
     except Exception as e:
-        print(f"[WARN] Routeur en échec ({e}), fallback sur 'hybrid'.")
+        logger.warning(f"Routeur en échec ({e}), fallback sur 'hybrid'.")
         route = "hybrid"
         fallback_reason = "router_error"
 
     latency_ms = (time.perf_counter() - start) * 1000
     if latency_ms > ROUTER_LATENCY_BUDGET_MS:
-        print(f"[WARN] Routeur au-delà du budget latence: {latency_ms:.0f}ms")
+        logger.warning(f"Routeur au-delà du budget latence: {latency_ms:.0f}ms")
 
     return route, latency_ms, fallback_reason
 

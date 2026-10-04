@@ -17,9 +17,20 @@ from dotenv import load_dotenv
 # requête sans que rien ne le signale.
 load_dotenv()
 
+# CORRECTIF (Phase 6) : ancrer tous les chemins par défaut sur
+# l'emplacement réel de ce fichier, indépendamment du répertoire de
+# travail du processus qui l'exécute. Claude Desktop (packaging MSIX)
+# ne respecte pas de façon fiable le "cwd" configuré dans
+# claude_desktop_config.json — un chemin relatif comme "./data/..."
+# pouvait donc pointer n'importe où selon qui lance le serveur,
+# provoquant un FileNotFoundError silencieux côté Claude Desktop alors
+# que tout fonctionnait en CLI (où le cwd est toujours le bon par
+# construction, puisque c'est nous qui lançons depuis le projet).
+PROJECT_ROOT = Path(__file__).resolve().parent
+
 # --- Repo cible ---------------------------------------------------------
 # Chemin absolu vers le repo de code à indexer (le tien, en usage réel).
-REPO_PATH = os.getenv("REPO_PATH", "./sample_repo")
+REPO_PATH = os.getenv("REPO_PATH", str(PROJECT_ROOT / "sample_repo"))
 
 # Extensions de fichiers à indexer (adapter selon ton langage principal)
 SUPPORTED_EXTENSIONS = {".py", ".ts", ".tsx", ".js", ".jsx"}
@@ -41,7 +52,7 @@ QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "search_code_chunks")
 
 # --- Index sparse (BM25) --------------------------------------------------
-BM25_INDEX_PATH = os.getenv("BM25_INDEX_PATH", "./data/bm25_index.json")
+BM25_INDEX_PATH = os.getenv("BM25_INDEX_PATH", str(PROJECT_ROOT / "data" / "bm25_index.json"))
 
 # --- Routeur (NIM) -------------------------------------------------------
 # Nécessite NVIDIA_API_KEY dans l'environnement (.env)
@@ -58,11 +69,20 @@ ROUTER_MODEL = os.getenv("ROUTER_MODEL", "meta/llama-3.2-11b-vision-instruct")
 ROUTER_MAX_TOKENS = 50  # réponse courte attendue: "dense" | "sparse" | "hybrid"
 ROUTER_LATENCY_BUDGET_MS = 200  # critère de validation du projet
 RERANK_CONFIDENCE_THRESHOLD = -5.0
+
 # --- Recherche / fusion -----------------------------------------------------
 TOP_K_DEFAULT = 5
 TOP_K_CANDIDATES = 20  # nombre de candidats avant reranking éventuel
 RRF_K = 60  # constante standard pour Reciprocal Rank Fusion
 
 # --- Chemins internes --------------------------------------------------------
-DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR = Path(os.getenv("DATA_DIR", str(PROJECT_ROOT / "data")))
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+except PermissionError:
+    # Le serveur MCP (lecture seule) n'a pas besoin de ce droit, et
+    # certains environnements (Claude Desktop packagé MSIX) le lui
+    # refusent explicitement. La création reste la responsabilité du
+    # script d'indexation (scripts/index_repo.py), lancé depuis un
+    # terminal normal, qui lui écrit réellement des données.
+    pass

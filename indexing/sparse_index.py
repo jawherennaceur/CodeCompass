@@ -7,7 +7,7 @@ symbole précis) plutôt qu'une intention sémantique floue.
 import json
 import re
 from dataclasses import dataclass, asdict
-
+import sys
 from rank_bm25 import BM25Okapi
 
 from config import BM25_INDEX_PATH
@@ -119,4 +119,4 @@ if __name__ == "__main__":
     chunks = parse_repo()
     index = build_sparse_index(chunks)
     index.save()
-    print(f"Index BM25 construit et sauvegardé ({len(chunks)} chunks).")
+    print(f"Index BM25 construit et sauvegardé ({len(chunks)} chunks).", file=sys.stderr)
