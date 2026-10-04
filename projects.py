@@ -16,6 +16,12 @@ REGISTRY_PATH = DATA_DIR / "projects.json"
 REPOS_DIR = DATA_DIR / "repos"  # clones Git locaux
 
 
+class ProjectError(Exception):
+    """Erreur liée au registre de projets — message pensé pour être
+    lisible tel quel par Claude et transmis à l'utilisateur."""
+    pass
+
+
 def _sanitize(name: str) -> str:
     safe = re.sub(r"[^a-zA-Z0-9_]", "_", name.strip().lower())
     return safe or "project"
@@ -62,17 +68,51 @@ def project_exists(name: str, registry_path: Path = REGISTRY_PATH) -> bool:
 
 
 def register_project(
-    name: str, source_type: str, source: str, registry_path: Path = REGISTRY_PATH
+    name: str,
+    source_type: str,
+    source: str,
+    registry_path: Path = REGISTRY_PATH,
+    overwrite: bool = False,
 ) -> Project:
-    if source_type not in {"local", "github"}:
-        raise ValueError(f"source_type invalide: {source_type} (attendu: 'local' ou 'github')")
+    """Enregistre un nouveau projet.
+
+    CORRECTIF (revue) : lève désormais ProjectError si 'name' existe déjà
+    (sauf overwrite=True explicite) — avant, un ré-enregistrement
+    écrasait silencieusement l'entrée existante, perdant son historique
+    d'indexation sans aucun avertissement.
+    """
+    registry = _load_registry(registry_path)
+
+    if name in registry and not overwrite:
+        raise ProjectError(
+            f"Un projet nommé '{name}' existe déjà. Utilise un autre nom, "
+            f"ou overwrite=True pour le remplacer explicitement."
+        )
 
     safe_name = _sanitize(name)
 
+    # CORRECTIF (revue, bug 🟠) : deux noms différents peuvent produire
+    # le même safe_name après nettoyage (ex: "Mon-Projet" et "mon projet"
+    # donnent tous les deux "mon_projet") — sans ce contrôle, les deux
+    # projets se retrouveraient avec la MÊME collection Qdrant et le
+    # MÊME fichier BM25, réintroduisant par un autre chemin le bug de
+    # pollution croisée qu'on vient de corriger.
+    for other_name, other_data in registry.items():
+        if other_name == name:
+            continue  # c'est le projet qu'on met à jour (cas overwrite), pas une collision
+        if _sanitize(other_name) == safe_name:
+            raise ProjectError(
+                f"Le nom '{name}' entre en collision avec le projet existant "
+                f"'{other_name}' une fois normalisé ('{safe_name}'). "
+                f"Choisis un nom plus distinct."
+            )
+
     if source_type == "local":
         repo_path = source
-    else:
+    elif source_type == "github":
         repo_path = str(REPOS_DIR / safe_name)
+    else:
+        raise ValueError(f"source_type invalide: {source_type} (attendu: 'local' ou 'github')")
 
     project = Project(
         name=name,
@@ -83,7 +123,6 @@ def register_project(
         bm25_index_path=str(DATA_DIR / f"bm25_{safe_name}.json"),
     )
 
-    registry = _load_registry(registry_path)
     registry[name] = asdict(project)
     _save_registry(registry, registry_path)
     return project
@@ -92,6 +131,35 @@ def register_project(
 def update_last_indexed(name: str, timestamp: str | None = None, registry_path: Path = REGISTRY_PATH):
     registry = _load_registry(registry_path)
     if name not in registry:
-        raise KeyError(f"Projet inconnu: {name}")
+        raise ProjectError(f"Projet inconnu: '{name}'")
     registry[name]["last_indexed_at"] = timestamp or datetime.now(timezone.utc).isoformat()
+    _save_registry(registry, registry_path)
+
+
+def delete_project(name: str, registry_path: Path = REGISTRY_PATH, cleanup_data: bool = True) -> None:
+    """CORRECTIF (revue) : nouvelle fonction — il était jusqu'ici
+    impossible de retirer un projet du registre. Par défaut, nettoie
+    aussi sa collection Qdrant et son fichier BM25 (cleanup_data=True) ;
+    les échecs de nettoyage (ex: Qdrant injoignable) sont loggés mais
+    n'empêchent pas la suppression de l'entrée du registre."""
+    registry = _load_registry(registry_path)
+    if name not in registry:
+        raise ProjectError(f"Projet inconnu: '{name}'")
+
+    project = Project(**registry[name])
+
+    if cleanup_data:
+        from logging_config import get_logger
+        logger = get_logger(__name__)
+        try:
+            from indexing.dense_index import get_client
+            get_client().delete_collection(project.qdrant_collection)
+        except Exception as e:
+            logger.warning(f"Échec suppression collection Qdrant '{project.qdrant_collection}': {e}")
+        try:
+            Path(project.bm25_index_path).unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"Échec suppression fichier BM25 '{project.bm25_index_path}': {e}")
+
+    del registry[name]
     _save_registry(registry, registry_path)

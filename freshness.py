@@ -2,8 +2,21 @@
 Vérification de fraîcheur d'un projet : détecte si son code source a
 été modifié depuis la dernière indexation, pour déclencher une
 ré-indexation automatique avant la recherche (projets locaux
-uniquement — les projets GitHub se rafraîchissent via un outil dédié,
-pas automatiquement, pour éviter un appel réseau à chaque recherche).
+uniquement — les projets GitHub se rafraîchissent via un outil dédié).
+
+LIMITE CONNUE, NON CORRIGÉE (revue) : _latest_mtime() parcourt TOUS les
+fichiers du repo à chaque recherche. Sur un petit repo, c'est instantané ;
+sur un très gros repo (milliers de fichiers), ça peut ajouter une
+latence perceptible à chaque recherche. Pas de correctif simple et
+correct disponible : utiliser la date de modification du DOSSIER parent
+au lieu de chaque fichier semble tentant, mais c'est FAUX sous Windows/
+NTFS — modifier le contenu d'un fichier ne met pas à jour la date de
+modification de son dossier parent (celle-ci ne change qu'à l'ajout/
+suppression/renommage d'une entrée). Une vraie solution demanderait soit
+un file watcher permanent (complexité qu'on a délibérément écartée),
+soit un cache de hashs de fichiers (complexité supplémentaire, non
+implémentée pour l'instant). À surveiller si l'usage sur un gros repo
+réel montre une latence gênante.
 """
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,8 +29,6 @@ logger = get_logger(__name__)
 
 
 def _latest_mtime(repo_path: str) -> datetime | None:
-    """Date de modification la plus récente parmi les fichiers de code
-    du projet. None si le dossier est vide/inexistant."""
     root = Path(repo_path)
     if not root.exists():
         return None
@@ -36,10 +47,6 @@ def _latest_mtime(repo_path: str) -> datetime | None:
 
 
 def needs_reindex(project: Project) -> bool:
-    """True si le projet doit être ré-indexé avant une recherche :
-    jamais indexé, ou code modifié depuis la dernière indexation.
-    Ne s'applique qu'aux projets locaux — les projets GitHub ne sont
-    jamais ré-indexés automatiquement (voir docstring du module)."""
     if project.source_type != "local":
         return False
 
@@ -48,7 +55,7 @@ def needs_reindex(project: Project) -> bool:
 
     latest_change = _latest_mtime(project.repo_path)
     if latest_change is None:
-        return False  # dossier vide/inexistant, rien à ré-indexer
+        return False
 
     last_indexed = datetime.fromisoformat(project.last_indexed_at)
     return latest_change > last_indexed
